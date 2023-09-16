@@ -1,13 +1,20 @@
 package model
 
-import "github.com/google/uuid"
+import (
+	"github.com/google/uuid"
+	"github.com/lib/pq"
+)
 
-type JSONB map[string]interface{}
+type ChoreRepetition struct {
+	Days []int64 `json:"days"`
+}
 
 type Chore struct {
-	ID          uuid.UUID `gorm:"primaryKey; default:uuid_generate_v4()"`
-	Name        string    `gorm:"size:255"`
-	Description string    `gorm:"size:255"`
-	Points      uint      `gorm:"size:255"`
-	Repetition  JSONB     `gorm:"type:jsonb"`
+	ID             uuid.UUID     `gorm:"primaryKey; default:uuid_generate_v4()" json:"id"`
+	Name           string        `gorm:"size:255" json:"name"`
+	Description    string        `gorm:"size:255" json:"description"`
+	Points         uint          `gorm:"size:255" json:"points"`
+	HouseholdId    uuid.UUID     `gorm:"not null" json:"householdId"`
+	WeekDayRepeats pq.Int64Array `gorm:"type:integer[]" json:"weekDayRepeats"`
+	Household      Household     `json:"household"`
 }

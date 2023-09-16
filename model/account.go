@@ -2,15 +2,14 @@ package model
 
 import (
 	"github.com/google/uuid"
-	"gorm.io/gorm"
 )
 
 type Account struct {
-	gorm.Model
-	ID          uuid.UUID `gorm:"primaryKey; default:uuid_generate_v4()"`
-	FirstName   string    `gorm:"size:255"`
-	LastName    string    `gorm:"size:255"`
-	Email       string    `gorm:"size:255, unique"`
-	HouseholdID uuid.UUID
+	ID          uuid.UUID `gorm:"primaryKey; default:uuid_generate_v4()" json:"id"`
+	FirstName   string    `gorm:"size:255" json:"firstName"`
+	LastName    string    `gorm:"size:255" json:"lastName"`
+	Email       string    `gorm:"size:255, unique" json:"email"`
+	HouseholdID uuid.UUID `gorm:"not null" json:"householdId"`
+	PictureURL  string    `gorm:"size:255" json:"pictureUrl"`
 	Household   Household
 }

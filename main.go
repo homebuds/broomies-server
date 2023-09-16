@@ -1,17 +1,19 @@
 package main
 
 import (
-	"housebuds/model"
-	"housebuds/service"
+	"homebuds/model"
+	"homebuds/service"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 var db service.DBService
 
 func main() {
-	dsn := ""
+	dsn := "postgresql://rustam:1DOh1353k5zPYL5-7HtecQ@htnx-project-12229.7tt.cockroachlabs.cloud:26257/defaultdb?sslmode=verify-full"
 	var err error
 	db, err = service.NewDBService(dsn)
 	if err != nil {
@@ -19,16 +21,95 @@ func main() {
 	}
 	r := gin.Default()
 	r.POST("/login", Login)
-
+	r.GET("/ping", func(c *gin.Context) {
+		c.JSON(200, gin.H{
+			"message": "pong",
+		})
+	})
+	r.GET("/api/chore/list/:household_id", GetChores)
+	r.POST("/api/chore", CreateChore)
+	r.GET("/api/assigned-chore/list/:household_id", GetAssignedChores)
+	r.GET("/api/account/:account_id", GetAccountById)
+	r.PATCH("/api/assigned-chore/:assigned_chore_id/complete", MarkAssignedChoreComplete)
 	r.Run() // listen and serve on
 }
 
-type GetAccountRequest struct {
+type LoginRequest struct {
 	Email string `json:"email"`
 }
 
+func GetAccountById(c *gin.Context) {
+	accountId := c.Param("account_id")
+	accountUuid, err := uuid.Parse(accountId)
+	if err != nil {
+		c.JSON(400, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	account, err := db.GetAccountByID(accountUuid)
+	if err != nil {
+		c.JSON(500, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	c.JSON(200, account)
+}
+
+func MarkAssignedChoreComplete(c *gin.Context) {
+	assignedChoreParam := c.Param("assigned_chore_id")
+	assignedChoreUUID, err := uuid.Parse(assignedChoreParam)
+	if err != nil {
+		c.JSON(400, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	err = db.MarkAssignedChoreComplete(assignedChoreUUID)
+	assignedChore, err := db.GetAssignedChore(assignedChoreUUID)
+	if err != nil {
+		c.JSON(500, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	currChoreDueDate := assignedChore.Date
+	points := int(assignedChore.Chore.Points)
+	if currChoreDueDate.After(time.Now()) {
+		points *= -1
+	}
+
+	// Get user with least chores
+	_, err = db.GetAccountsWithLeastChores(assignedChore.Chore.HouseholdId)
+	if err != nil {
+		c.JSON(500, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+
+}
+func GetChores(c *gin.Context) {
+	householdId := c.Param("household_id")
+	householdUuid, err := uuid.Parse(householdId)
+	if err != nil {
+		c.JSON(400, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	chores, err := db.GetChores(householdUuid)
+	if err != nil {
+		c.JSON(500, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	c.JSON(200, chores)
+}
 func Login(c *gin.Context) {
-	var req GetAccountRequest
+	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{
 			"error": err.Error(),
@@ -46,12 +127,37 @@ func Login(c *gin.Context) {
 }
 
 type CreateChoreRequest struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description"`
-	Points      uint                   `json:"points"`
-	Repetition  map[string]interface{} `json:"repetition"`
+	Name        string                `json:"name"`
+	Description string                `json:"description"`
+	Points      uint                  `json:"points"`
+	HouseholdId uuid.UUID             `json:"householdId"`
+	Repetition  model.ChoreRepetition `json:"repetition"`
 }
 
+func min(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+func GetAssignedChores(c *gin.Context) {
+	householdId := c.Param("household_id")
+	householdUuid, err := uuid.Parse(householdId)
+	if err != nil {
+		c.JSON(400, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	chores, err := db.GetAssignedChores(householdUuid)
+	if err != nil {
+		c.JSON(500, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	c.JSON(200, chores)
+}
 func CreateChore(c *gin.Context) {
 	var req CreateChoreRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -60,11 +166,18 @@ func CreateChore(c *gin.Context) {
 		})
 		return
 	}
+	if len(req.Repetition.Days) == 0 {
+		c.JSON(400, gin.H{
+			"error": "Repetition days should not be empty",
+		})
+		return
+	}
 	chore := model.Chore{
-		Name:        req.Name,
-		Description: req.Description,
-		Points:      req.Points,
-		Repetition:  req.Repetition,
+		Name:           req.Name,
+		Description:    req.Description,
+		Points:         req.Points,
+		WeekDayRepeats: pq.Int64Array(req.Repetition.Days),
+		HouseholdId:    req.HouseholdId,
 	}
 	err := db.CreateChore(&chore)
 	if err != nil {
@@ -73,38 +186,51 @@ func CreateChore(c *gin.Context) {
 		})
 		return
 	}
-	// Load already assigned chores in the household
-
-	// Assign chore to users based on repetition
-
-	//
-	// Create a monthly schedule for a chore, based of repetitions assign to users
-
-	c.JSON(200, chore)
-}
-
-// Given an array of users, array of chore instances that occur on a given day of the week
-// and whether task task occurs weekly or biweekly or monthly
-// assign chore instances to users
-func AssignChores(users []model.Account, chores []model.Chore) {
-	now := time.Now()
-	startDateOfWeek := int(now.Weekday())
-	daysInMonth := DaysInMonth(now)
-	weeks := make([][]int, 5)
-	// Create array of weeks
-	dayCount := 0
-	for i := 0; i < 5; i++ {
-		for (startDateOfWeek < 7) && (dayCount < daysInMonth) {
-			weeks[i] = append(weeks[i], startDateOfWeek+1)
-			startDateOfWeek++
-			dayCount++
+	curr := time.Now()
+	var nextDate int64 = 7
+	for _, day := range req.Repetition.Days {
+		diff := day - (int64(curr.Weekday()) + 1)
+		if diff < 0 {
+			diff += 7
 		}
-		startDateOfWeek = 0
+		nextDate = min(diff, nextDate)
 	}
-
-}
-
-func DaysInMonth(t time.Time) int {
-	y, m, _ := t.Date()
-	return time.Date(y, m+1, 0, 0, 0, 0, 0, time.UTC).Day()
+	nextTaskOccurrence := curr.AddDate(0, 0, int(nextDate))
+	// Get user with least chores
+	acc, err := db.GetAccountsWithLeastChores(req.HouseholdId)
+	if err != nil {
+		c.JSON(500, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	// Create assigned chore
+	if len(chore.WeekDayRepeats) == 1 {
+		err = db.CreateAssignedChore(chore.ID, acc[0].ID, nextTaskOccurrence)
+	} else {
+		nextTaskOccurrences := make([]time.Time, 0)
+		for _, day := range req.Repetition.Days {
+			diff := day - (int64(curr.Weekday()) + 1)
+			if diff < 0 {
+				diff += 7
+			}
+			nextTaskOccurrences = append(nextTaskOccurrences, curr.AddDate(0, 0, int(diff)))
+		}
+		for i := range nextTaskOccurrences {
+			err = db.CreateAssignedChore(chore.ID, acc[i%len(acc)].ID, nextTaskOccurrences[i])
+			if err != nil {
+				c.JSON(500, gin.H{
+					"error": err.Error(),
+				})
+				return
+			}
+		}
+	}
+	if err != nil {
+		c.JSON(500, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	c.JSON(200, chore)
 }
