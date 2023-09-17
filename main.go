@@ -3,17 +3,21 @@ package main
 import (
 	"homebuds/model"
 	"homebuds/service"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/joho/godotenv"
 	"github.com/lib/pq"
 )
 
 var db service.DBService
 
 func main() {
-	dsn := "postgresql://rustam:1DOh1353k5zPYL5-7HtecQ@htnx-project-12229.7tt.cockroachlabs.cloud:26257/defaultdb?sslmode=verify-full"
+	godotenv.Load()
+	dsn := os.Getenv("POSTGRES_DSN")
 	var err error
 	db, err = service.NewDBService(dsn)
 	if err != nil {
@@ -30,7 +34,11 @@ func main() {
 	r.POST("/api/chore", CreateChore)
 	r.GET("/api/assigned-chore/list/:household_id", GetAssignedChores)
 	r.GET("/api/account/:account_id", GetAccountById)
+	r.GET("/api/top-roommates/:household_id", GetRoommatesWithTopScore)
 	r.PATCH("/api/assigned-chore/:assigned_chore_id/complete", MarkAssignedChoreComplete)
+	r.PUT("/api/financial-transaction", CreateFinancialTransaction)
+	r.GET("/api/financial-transaction/list/:household_id/:account_id", GetFinancialTransactions)
+	r.GET("/api/spend-information/household/:household_id/account/:account_id", GetSpendInformation)
 	r.Run() // listen and serve on
 }
 
@@ -38,6 +46,37 @@ type LoginRequest struct {
 	Email string `json:"email"`
 }
 
+func GetRoommatesWithTopScore(c *gin.Context) {
+	householdParam := c.Param("household_id")
+	householdID, err := uuid.Parse(householdParam)
+	if err != nil {
+		c.JSON(400, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	var topN int
+	if topNParam := c.Query("top_n"); topNParam == "" {
+		topN = 4
+	} else {
+		topN, err = strconv.Atoi(topNParam)
+		if err != nil {
+			c.JSON(400, gin.H{
+				"error": err.Error(),
+			})
+			return
+		}
+	}
+	accounts, err := db.GetAccountsWitMostPoints(householdID, topN)
+	if err != nil {
+		c.JSON(500, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	c.JSON(200, accounts)
+
+}
 func GetAccountById(c *gin.Context) {
 	accountId := c.Param("account_id")
 	accountUuid, err := uuid.Parse(accountId)
@@ -67,6 +106,13 @@ func MarkAssignedChoreComplete(c *gin.Context) {
 		return
 	}
 	err = db.MarkAssignedChoreComplete(assignedChoreUUID)
+	if err != nil {
+		c.JSON(500, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+
 	assignedChore, err := db.GetAssignedChore(assignedChoreUUID)
 	if err != nil {
 		c.JSON(500, gin.H{
@@ -76,12 +122,10 @@ func MarkAssignedChoreComplete(c *gin.Context) {
 	}
 	currChoreDueDate := assignedChore.Date
 	points := int(assignedChore.Chore.Points)
-	if currChoreDueDate.After(time.Now()) {
+	if currChoreDueDate.Before(time.Now()) {
 		points *= -1
 	}
-
-	// Get user with least chores
-	_, err = db.GetAccountsWithLeastChores(assignedChore.Chore.HouseholdId)
+	err = db.UpsertRoommateScore(assignedChore.AccountID, assignedChore.Chore.HouseholdId, points)
 	if err != nil {
 		c.JSON(500, gin.H{
 			"error": err.Error(),
@@ -89,7 +133,25 @@ func MarkAssignedChoreComplete(c *gin.Context) {
 		return
 	}
 
+	// Get user with least chores
+	acc, err := db.GetAccountsWithLeastChores(assignedChore.Chore.HouseholdId)
+	if err != nil {
+		c.JSON(500, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	err = db.CreateAssignedChore(assignedChore.Chore.ID, acc[0].ID, currChoreDueDate.AddDate(0, 0, 7))
+	if err != nil {
+		c.JSON(500, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	c.JSON(200, assignedChore)
 }
+
 func GetChores(c *gin.Context) {
 	householdId := c.Param("household_id")
 	householdUuid, err := uuid.Parse(householdId)
@@ -131,6 +193,7 @@ type CreateChoreRequest struct {
 	Description string                `json:"description"`
 	Points      uint                  `json:"points"`
 	HouseholdId uuid.UUID             `json:"householdId"`
+	Icon        string                `json:"icon"`
 	Repetition  model.ChoreRepetition `json:"repetition"`
 }
 
@@ -177,6 +240,7 @@ func CreateChore(c *gin.Context) {
 		Description:    req.Description,
 		Points:         req.Points,
 		WeekDayRepeats: pq.Int64Array(req.Repetition.Days),
+		Icon:           req.Icon,
 		HouseholdId:    req.HouseholdId,
 	}
 	err := db.CreateChore(&chore)
@@ -233,4 +297,158 @@ func CreateChore(c *gin.Context) {
 		return
 	}
 	c.JSON(200, chore)
+}
+
+type CreateFinancialTransactionRequest struct {
+	Amount      float64   `json:"amount"`
+	Description string    `json:"description"`
+	Name        string    `json:"name"`
+	AccountID   uuid.UUID `json:"accountId"`
+	HouseholdID uuid.UUID `json:"householdId"`
+}
+
+type TransactionWithOwed struct {
+	model.FinancialTransaction
+	Owed float64 `json:"owed"`
+}
+
+func GetFinancialTransactions(c *gin.Context) {
+	householdId := c.Param("household_id")
+	householdUuid, err := uuid.Parse(householdId)
+	if err != nil {
+		c.JSON(400, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	accountIdParam := c.Param("account_id")
+	accountId, err := uuid.Parse(accountIdParam)
+	if err != nil {
+		c.JSON(400, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	transactions, err := db.GetUnsettledFinancialTransactions(householdUuid)
+	if err != nil {
+		c.JSON(500, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	accounts, err := db.GetAccounts(householdUuid)
+	if err != nil {
+		c.JSON(500, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	transactionsWithOwed := make([]TransactionWithOwed, len(transactions))
+	for i, tx := range transactions {
+		if tx.AccountID == accountId {
+			transactionsWithOwed[i] = TransactionWithOwed{
+				FinancialTransaction: tx,
+				Owed:                 -(tx.Amount / float64(len(accounts))) * float64(len(accounts)-1),
+			}
+		} else {
+			transactionsWithOwed[i] = TransactionWithOwed{
+				FinancialTransaction: tx,
+				Owed:                 tx.Amount / float64(len(accounts)),
+			}
+		}
+	}
+	c.JSON(200, transactionsWithOwed)
+}
+
+func CreateFinancialTransaction(c *gin.Context) {
+	var req CreateFinancialTransactionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	tx, err := db.CreateFinancialTransaction(req.Amount, req.Name, req.AccountID, req.HouseholdID)
+	if err != nil {
+		c.JSON(500, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	c.JSON(200, tx)
+}
+
+type SpendInformation struct {
+	TotalSpent           float64 `json:"totalSpent"`
+	AvgSpent             float64 `json:"avgSpent"`
+	AmountOwed           float64 `json:"amountOwed"`
+	RoommatePointsAmount float64 `json:"roommatePointsAmount"`
+}
+
+func GetSpendInformation(c *gin.Context) {
+	householdId := c.Param("household_id")
+	targetAccountId := c.Param("account_id")
+	householdUuid, err := uuid.Parse(householdId)
+	if err != nil {
+		c.JSON(400, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	targetAccountUUID, err := uuid.Parse(targetAccountId)
+	if err != nil {
+		c.JSON(400, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	unsettledTransactions, err := db.GetUnsettledFinancialTransactions(householdUuid)
+
+	totalSpent := 0.0
+	spentPerPerson := make(map[uuid.UUID]float64)
+	for _, tx := range unsettledTransactions {
+		totalSpent += tx.Amount
+		if _, ok := spentPerPerson[tx.AccountID]; !ok {
+			spentPerPerson[tx.AccountID] = 0.0
+		}
+		spentPerPerson[tx.AccountID] += tx.Amount
+	}
+	var meanSpentPerPerson float64 = 0
+	if len(spentPerPerson) > 0 {
+		meanSpentPerPerson = totalSpent / float64(len(spentPerPerson))
+	}
+	roommatePointsPerPerson := make(map[uuid.UUID]float64)
+	for accountId := range spentPerPerson {
+		points, err := db.GetPointsForAccount(accountId)
+		if err != nil {
+			points = 500
+		}
+		roommatePointsPerPerson[accountId] = float64(points)
+		spentPerPerson[accountId] -= meanSpentPerPerson
+	}
+	pointAmount := totalSpent * 0.1
+	totalPoints := 0.0
+	for _, points := range roommatePointsPerPerson {
+		totalPoints += points
+	}
+	pointSavings := 0.0
+
+	if totalPoints > 0 {
+		pointSavings = pointAmount * (roommatePointsPerPerson[targetAccountUUID] / totalPoints)
+	}
+	spentPerPerson[targetAccountUUID] -= pointSavings
+	spendInfo := SpendInformation{
+		TotalSpent: totalSpent,
+	}
+	if len(spentPerPerson) > 0 {
+		spendInfo.AvgSpent = meanSpentPerPerson
+	}
+	if _, ok := spentPerPerson[targetAccountUUID]; ok {
+		spendInfo.AmountOwed = spentPerPerson[targetAccountUUID]
+	}
+	if _, ok := roommatePointsPerPerson[targetAccountUUID]; ok {
+		spendInfo.RoommatePointsAmount = roommatePointsPerPerson[targetAccountUUID]
+	}
+	c.JSON(200, spendInfo)
 }

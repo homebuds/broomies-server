@@ -14,6 +14,7 @@ type Chore struct {
 	Name           string        `gorm:"size:255" json:"name"`
 	Description    string        `gorm:"size:255" json:"description"`
 	Points         uint          `gorm:"size:255" json:"points"`
+	Icon           string        `json:"icon"`
 	HouseholdId    uuid.UUID     `gorm:"not null" json:"householdId"`
 	WeekDayRepeats pq.Int64Array `gorm:"type:integer[]" json:"weekDayRepeats"`
 	Household      Household     `json:"household"`

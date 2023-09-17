@@ -20,7 +20,13 @@ type DBService interface {
 	GetAssignedChores(householdID uuid.UUID) ([]model.AssignedChore, error)
 	MarkAssignedChoreComplete(choreID uuid.UUID) error
 	GetAssignedChore(assignedChoreID uuid.UUID) (model.AssignedChore, error)
-	UpsertRoommateScore(accountID uuid.UUID, points uint) error
+	GetAccountsWitMostPoints(householdID uuid.UUID, topN int) ([]model.RoommateScore, error)
+	UpsertRoommateScore(accountID uuid.UUID, householdID uuid.UUID, points int) error
+	CreateFinancialTransaction(amount float64, name string, accountID uuid.UUID, householdID uuid.UUID) (model.FinancialTransaction, error)
+	GetFinancialTransactions(householdID uuid.UUID) ([]model.FinancialTransaction, error)
+	GetUnsettledFinancialTransactions(householdID uuid.UUID) ([]model.FinancialTransaction, error)
+	GetPointsForAccount(accountID uuid.UUID) (int, error)
+	GetAccounts(householdId uuid.UUID) ([]model.Account, error)
 }
 
 type dbService struct {
@@ -32,10 +38,15 @@ func NewDBService(connUrl string) (DBService, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.AutoMigrate(model.Account{}, model.Chore{}, model.AssignedChore{}, model.Household{})
+	db.AutoMigrate(model.Account{}, model.Chore{}, model.AssignedChore{}, model.Household{}, model.RoommateScore{}, model.FinancialTransaction{})
 	return &dbService{db}, nil
 }
 
+func (s *dbService) GetAccounts(householdId uuid.UUID) ([]model.Account, error) {
+	var accounts []model.Account
+	err := s.db.Where("household_id = ?", householdId).Find(&accounts).Error
+	return accounts, err
+}
 func (s *dbService) GetAccountByID(id uuid.UUID) (model.Account, error) {
 	var account model.Account
 	err := s.db.Where("id = ?", id).First(&account).Error
@@ -99,20 +110,73 @@ func (s *dbService) GetAssignedChore(assignedChoreID uuid.UUID) (model.AssignedC
 	var assignedChore model.AssignedChore
 	err := s.db.Joins("Account").
 		Joins("Chore").
-		Where("id = ?", assignedChoreID).
+		Where("assigned_chores.id = ?", assignedChoreID).
 		Find(&assignedChore).Error
 	return assignedChore, err
 }
 
-func (s *dbService) UpsertRoommateScore(accountID uuid.UUID, points uint) error {
+func (s *dbService) UpsertRoommateScore(accountID uuid.UUID, householdID uuid.UUID, points int) error {
 	var roommateScore model.RoommateScore
 	err := s.db.Where("account_id = ?", accountID).First(&roommateScore).Error
-	if err != nil {
+	if err == gorm.ErrRecordNotFound {
 		roommateScore = model.RoommateScore{
-			AccountID: accountID,
-			Points:    points,
+			AccountID:   accountID,
+			Points:      uint(500 + points),
+			HouseholdID: householdID,
 		}
 		return s.db.Create(&roommateScore).Error
+	} else if err != nil {
+		return err
 	}
-	return s.db.Model(&roommateScore).Update("points", roommateScore.Points+points).Error
+
+	if roommateScore.Points < uint(-points) {
+		points = 0
+	} else {
+		points = int(roommateScore.Points) + points
+	}
+	return s.db.Model(&roommateScore).Update("points", points).Error
+}
+
+func (s *dbService) GetAccountsWitMostPoints(householdID uuid.UUID, topN int) ([]model.RoommateScore, error) {
+	var scores []model.RoommateScore
+	err := s.db.Joins("Account").
+		Joins("Household", s.db.Where("roommate_scores.household_id = ?", householdID)).
+		Order("roommate_scores.points").
+		Find(&scores).Limit(topN).Error
+	return scores, err
+}
+
+func (s *dbService) CreateFinancialTransaction(
+	amount float64, name string, accountID uuid.UUID, householdID uuid.UUID,
+) (model.FinancialTransaction, error) {
+	tx := model.FinancialTransaction{
+		Amount:      amount,
+		Name:        name,
+		AccountID:   accountID,
+		HouseholdID: householdID,
+	}
+	err := s.db.Create(&tx).Error
+	return tx, err
+}
+
+func (s *dbService) GetFinancialTransactions(householdID uuid.UUID) ([]model.FinancialTransaction, error) {
+	var txs []model.FinancialTransaction
+	err := s.db.Joins("Account").
+		Joins("Household", s.db.Where("financial_transactions.household_id = ?", householdID)).
+		Find(&txs).Error
+	return txs, err
+}
+
+func (s *dbService) GetUnsettledFinancialTransactions(householdID uuid.UUID) ([]model.FinancialTransaction, error) {
+	var txs []model.FinancialTransaction
+	err := s.db.
+		Where("settled_at IS NULL AND household_id = ?", householdID).
+		Find(&txs).Error
+	return txs, err
+}
+
+func (s *dbService) GetPointsForAccount(accountID uuid.UUID) (int, error) {
+	var roommateScore model.RoommateScore
+	err := s.db.Where("account_id = ?", accountID).First(&roommateScore).Error
+	return int(roommateScore.Points), err
 }
