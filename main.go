@@ -29,9 +29,7 @@ func main() {
 	r := gin.Default()
 	r.POST("/login", Login)
 	r.GET("/ping", func(c *gin.Context) {
-		c.JSON(200, gin.H{
-			"message": "pong",
-		})
+		c.Redirect(302, "https://google.com")
 	})
 	r.GET("/api/chore/list/:household_id", GetChores)
 	r.POST("/api/chore", CreateChore)
@@ -42,6 +40,9 @@ func main() {
 	r.PUT("/api/financial-transaction", CreateFinancialTransaction)
 	r.GET("/api/financial-transaction/list/:household_id/:account_id", GetFinancialTransactions)
 	r.GET("/api/spend-information/household/:household_id/account/:account_id", GetSpendInformation)
+	r.GET("/api/user-notifications/:account_id", GetUserNotifications)
+	r.GET("/api/chore/:chore_id", GetChore)
+	r.PATCH("/api/notification/:notification_id/account/:account_id/seen", MarkNoticationSeen)
 	r.Run() // listen and serve on
 }
 
@@ -49,6 +50,53 @@ type LoginRequest struct {
 	Email string `json:"email"`
 }
 
+func MarkNoticationSeen(c *gin.Context) {
+	notificationID := c.Param("notification_id")
+	accountID := c.Param("account_id")
+
+	notificationUUID, err := uuid.Parse(notificationID)
+	log.Printf("Notification ID: %s", notificationID)
+	if err != nil {
+		c.JSON(400, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	accountUUID, err := uuid.Parse(accountID)
+	log.Printf("Account ID: %s", accountID)
+	if err != nil {
+		c.JSON(400, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	err = db.SetNotificationSeen(notificationUUID, accountUUID)
+	if err != nil {
+		c.JSON(500, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	c.JSON(200, gin.H{})
+}
+func GetChore(c *gin.Context) {
+	choreUUID := c.Param("chore_id")
+	choreId, err := uuid.Parse(choreUUID)
+	if err != nil {
+		c.JSON(400, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	chore, err := db.GetChore(choreId)
+	if err != nil {
+		c.JSON(500, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	c.JSON(200, chore)
+}
 func GetRoommatesWithTopScore(c *gin.Context) {
 	householdParam := c.Param("household_id")
 	householdID, err := uuid.Parse(householdParam)
@@ -80,6 +128,7 @@ func GetRoommatesWithTopScore(c *gin.Context) {
 	c.JSON(200, accounts)
 
 }
+
 func GetAccountById(c *gin.Context) {
 	accountId := c.Param("account_id")
 	accountUuid, err := uuid.Parse(accountId)
@@ -116,12 +165,34 @@ func MarkAssignedChoreComplete(c *gin.Context) {
 		return
 	}
 
+	// Create notifications for all roommates
 	assignedChore, err := db.GetAssignedChore(assignedChoreUUID)
 	if err != nil {
 		c.JSON(500, gin.H{
 			"error": err.Error(),
 		})
 		return
+	}
+
+	// Create notification for all roommates
+	roommates, err := db.GetAccounts(assignedChore.Chore.HouseholdId)
+	if err != nil {
+		c.JSON(500, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	notificationID, err := db.CreateNotification(assignedChore.AccountID, assignedChore.AccountID, "COMPLETED", &assignedChore.ChoreID, nil)
+	for _, roommate := range roommates {
+		if roommate.ID != assignedChore.AccountID {
+			err := db.CreateUserNotification(roommate.ID, notificationID)
+			if err != nil {
+				c.JSON(500, gin.H{
+					"error": err.Error(),
+				})
+				return
+			}
+		}
 	}
 	currChoreDueDate := assignedChore.Date
 	points := int(assignedChore.Chore.Points)
@@ -206,6 +277,26 @@ func min(a, b int64) int64 {
 	}
 	return b
 }
+
+func GetUserNotifications(c *gin.Context) {
+	accountIdParam := c.Param("account_id")
+	accountId, err := uuid.Parse(accountIdParam)
+	if err != nil {
+		c.JSON(400, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	notifications, err := db.GetUserNotifications(accountId)
+	if err != nil {
+		c.JSON(500, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	c.JSON(200, notifications)
+}
+
 func GetAssignedChores(c *gin.Context) {
 	householdId := c.Param("household_id")
 	householdUuid, err := uuid.Parse(householdId)

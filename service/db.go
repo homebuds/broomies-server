@@ -27,6 +27,11 @@ type DBService interface {
 	GetUnsettledFinancialTransactions(householdID uuid.UUID) ([]model.FinancialTransaction, error)
 	GetPointsForAccount(accountID uuid.UUID) (int, error)
 	GetAccounts(householdId uuid.UUID) ([]model.Account, error)
+	CreateNotification(accountID uuid.UUID, actorAccountID uuid.UUID, action string, choreID *uuid.UUID, financialTransactionID *uuid.UUID) (uuid.UUID, error)
+	CreateUserNotification(accountID uuid.UUID, notificationID uuid.UUID) error
+	GetUserNotifications(accountID uuid.UUID) ([]model.UserNotification, error)
+	GetChore(choreId uuid.UUID) (model.Chore, error)
+	SetNotificationSeen(notificationID uuid.UUID, accountID uuid.UUID) error
 }
 
 type dbService struct {
@@ -38,7 +43,10 @@ func NewDBService(connUrl string) (DBService, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.AutoMigrate(model.Account{}, model.Chore{}, model.AssignedChore{}, model.Household{}, model.RoommateScore{}, model.FinancialTransaction{})
+	db.Migrator().AddColumn(&model.UserNotification{}, "seen")
+	db.Migrator().DropColumn(&model.UserNotification{}, "reviewed")
+	db.Migrator().AddColumn(&model.Notification{}, "created_at")
+	db.Migrator().CreateTable(&model.Notification{}, &model.UserNotification{}, &model.Account{}, &model.Chore{}, &model.ChoreCompletionReview{})
 	return &dbService{db}, nil
 }
 
@@ -179,4 +187,44 @@ func (s *dbService) GetPointsForAccount(accountID uuid.UUID) (int, error) {
 	var roommateScore model.RoommateScore
 	err := s.db.Where("account_id = ?", accountID).First(&roommateScore).Error
 	return int(roommateScore.Points), err
+}
+
+func (s *dbService) CreateNotification(accountID uuid.UUID, actorID uuid.UUID, action string, choreID *uuid.UUID, financialTransactionID *uuid.UUID) (uuid.UUID, error) {
+	notification := model.Notification{
+		ActorAccountID:         actorID,
+		Action:                 action,
+		ActorChoreID:           choreID,
+		FinancialTransactionID: financialTransactionID,
+	}
+	err := s.db.Create(&notification).Error
+	return notification.ID, err
+}
+
+func (s *dbService) CreateUserNotification(accountID uuid.UUID, notificationID uuid.UUID) error {
+	userNotification := model.UserNotification{
+		AccountID:      accountID,
+		NotificationID: notificationID,
+		Seen:           false,
+	}
+	return s.db.Create(&userNotification).Error
+}
+
+func (s *dbService) GetUserNotifications(accountID uuid.UUID) ([]model.UserNotification, error) {
+	var userNotifications []model.UserNotification
+	err := s.db.Joins("Notification").
+		Joins("Notification.ActorAccount").
+		Joins("Notification.ActorChore").
+		Where("user_notifications.account_id = ?", accountID).
+		Find(&userNotifications).Error
+	return userNotifications, err
+}
+
+func (s *dbService) GetChore(choreId uuid.UUID) (model.Chore, error) {
+	var chore model.Chore
+	err := s.db.Where("id = ?", choreId).First(&chore).Error
+	return chore, err
+}
+
+func (s *dbService) SetNotificationSeen(notificationID uuid.UUID, accountID uuid.UUID) error {
+	return s.db.Model(&model.UserNotification{}).Where("account_id = ? AND notification_id = ?", accountID, notificationID).Update("seen", true).Error
 }
