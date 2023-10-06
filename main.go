@@ -1,14 +1,15 @@
 package main
 
 import (
-	"homebuds/model"
-	"homebuds/service"
+	"log"
 	"os"
 	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	model "github.com/homebuds/broomies-server/internal/dbmodel"
+	"github.com/homebuds/broomies-server/service"
 	"github.com/joho/godotenv"
 	"github.com/lib/pq"
 )
@@ -16,7 +17,9 @@ import (
 var db service.DBService
 
 func main() {
-	godotenv.Load()
+	if err := godotenv.Load(); err != nil {
+		log.Print("No .env file found")
+	}
 	dsn := os.Getenv("POSTGRES_DSN")
 	var err error
 	db, err = service.NewDBService(dsn)
@@ -253,8 +256,8 @@ func CreateChore(c *gin.Context) {
 	curr := time.Now()
 	var nextDate int64 = 7
 	for _, day := range req.Repetition.Days {
-		diff := day - (int64(curr.Weekday()) + 1)
-		if diff < 0 {
+		diff := day - (int64(curr.Weekday()))
+		if diff <= 0 {
 			diff += 7
 		}
 		nextDate = min(diff, nextDate)
@@ -274,8 +277,8 @@ func CreateChore(c *gin.Context) {
 	} else {
 		nextTaskOccurrences := make([]time.Time, 0)
 		for _, day := range req.Repetition.Days {
-			diff := day - (int64(curr.Weekday()) + 1)
-			if diff < 0 {
+			diff := day - int64(curr.Weekday())
+			if diff <= 0 {
 				diff += 7
 			}
 			nextTaskOccurrences = append(nextTaskOccurrences, curr.AddDate(0, 0, int(diff)))
@@ -404,7 +407,13 @@ func GetSpendInformation(c *gin.Context) {
 		return
 	}
 	unsettledTransactions, err := db.GetUnsettledFinancialTransactions(householdUuid)
-
+	accounts, err := db.GetAccounts(householdUuid)
+	if err != nil {
+		c.JSON(500, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
 	totalSpent := 0.0
 	spentPerPerson := make(map[uuid.UUID]float64)
 	for _, tx := range unsettledTransactions {
@@ -415,28 +424,27 @@ func GetSpendInformation(c *gin.Context) {
 		spentPerPerson[tx.AccountID] += tx.Amount
 	}
 	var meanSpentPerPerson float64 = 0
-	if len(spentPerPerson) > 0 {
-		meanSpentPerPerson = totalSpent / float64(len(spentPerPerson))
+	if len(accounts) > 0 {
+		meanSpentPerPerson = totalSpent / float64(len(accounts))
 	}
 	roommatePointsPerPerson := make(map[uuid.UUID]float64)
-	for accountId := range spentPerPerson {
-		points, err := db.GetPointsForAccount(accountId)
+	for _, account := range accounts {
+		accountID := account.ID
+		points, err := db.GetPointsForAccount(accountID)
 		if err != nil {
 			points = 500
 		}
-		roommatePointsPerPerson[accountId] = float64(points)
-		spentPerPerson[accountId] -= meanSpentPerPerson
+		roommatePointsPerPerson[accountID] = float64(points)
+		spentPerPerson[accountID] -= meanSpentPerPerson
 	}
 	pointAmount := totalSpent * 0.1
 	totalPoints := 0.0
 	for _, points := range roommatePointsPerPerson {
 		totalPoints += points
 	}
+	log.Printf("Total points: %f", totalPoints)
 	pointSavings := 0.0
 
-	if totalPoints > 0 {
-		pointSavings = pointAmount * (roommatePointsPerPerson[targetAccountUUID] / totalPoints)
-	}
 	spentPerPerson[targetAccountUUID] -= pointSavings
 	spendInfo := SpendInformation{
 		TotalSpent: totalSpent,
@@ -447,8 +455,8 @@ func GetSpendInformation(c *gin.Context) {
 	if _, ok := spentPerPerson[targetAccountUUID]; ok {
 		spendInfo.AmountOwed = spentPerPerson[targetAccountUUID]
 	}
-	if _, ok := roommatePointsPerPerson[targetAccountUUID]; ok {
-		spendInfo.RoommatePointsAmount = roommatePointsPerPerson[targetAccountUUID]
+	if _, ok := roommatePointsPerPerson[targetAccountUUID]; ok && totalPoints > 0 {
+		spendInfo.RoommatePointsAmount = pointAmount * (roommatePointsPerPerson[targetAccountUUID] / totalPoints)
 	}
 	c.JSON(200, spendInfo)
 }

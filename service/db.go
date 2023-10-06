@@ -1,10 +1,10 @@
 package service
 
 import (
-	"homebuds/model"
 	"time"
 
 	"github.com/google/uuid"
+	model "github.com/homebuds/broomies-server/internal/dbmodel"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -129,7 +129,7 @@ func (s *dbService) UpsertRoommateScore(accountID uuid.UUID, householdID uuid.UU
 		return err
 	}
 
-	if roommateScore.Points < uint(-points) {
+	if points < 0 && roommateScore.Points < uint(-points) {
 		points = 0
 	} else {
 		points = int(roommateScore.Points) + points
